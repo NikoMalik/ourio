@@ -2,6 +2,7 @@ const Uring = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
+const config = @import("config");
 
 const io = @import("../ourio.zig");
 
@@ -17,10 +18,12 @@ ring: linux.IoUring,
 in_flight: Queue(io.Task, .in_flight) = .{},
 eventfd: ?posix.fd_t = null,
 
+const supported_flags = config.Config.supported_io_uring_flags;
+
 /// Initialize a Ring
 pub fn init(_: Allocator, entries: u16) !Uring {
     var params = std.mem.zeroInit(linux.io_uring_params, .{
-        .flags = supportedFlags(),
+        .flags = supported_flags,
         .sq_thread_idle = 1000,
     });
 
@@ -40,48 +43,10 @@ pub fn deinit(self: *Uring, gpa: Allocator) void {
     self.* = undefined;
 }
 
-fn supportedFlags() u32 {
-    // clamp is supported by all kernels that have io_uring
-    var flags: u32 = linux.IORING_SETUP_CLAMP;
-
-    var utsname: linux.utsname = undefined;
-    switch (linux.E.init(linux.uname(&utsname))) {
-        .SUCCESS => {},
-        else => return flags,
-    }
-
-    const release = if (std.mem.indexOfScalar(u8, &utsname.release, '-')) |idx|
-        utsname.release[0..idx]
-    else
-        &utsname.release;
-    const version = std.SemanticVersion.parse(release) catch return flags;
-    switch (version.order(.{ .major = 5, .minor = 18, .patch = 0 })) {
-        .lt => return flags,
-        else => flags |= linux.IORING_SETUP_SUBMIT_ALL,
-    }
-
-    switch (version.order(.{ .major = 5, .minor = 19, .patch = 0 })) {
-        .lt => return flags,
-        else => flags |= linux.IORING_SETUP_COOP_TASKRUN,
-    }
-
-    switch (version.order(.{ .major = 6, .minor = 0, .patch = 0 })) {
-        .lt => return flags,
-        else => flags |= linux.IORING_SETUP_SINGLE_ISSUER,
-    }
-
-    switch (version.order(.{ .major = 6, .minor = 1, .patch = 0 })) {
-        .lt => return flags,
-        else => flags |= linux.IORING_SETUP_DEFER_TASKRUN,
-    }
-
-    return flags;
-}
-
 /// Initializes a child Ring which can be woken up by self. This must be called from the thread
 /// which will operate the child ring. Initializes with the same queue size as the parent
 pub fn initChild(self: Uring, entries: u16) !Uring {
-    const flags: u32 = supportedFlags() | linux.IORING_SETUP_ATTACH_WQ;
+    const flags: u32 = supported_flags | linux.IORING_SETUP_ATTACH_WQ;
 
     var params = std.mem.zeroInit(linux.io_uring_params, .{
         .flags = flags,
@@ -143,11 +108,11 @@ pub fn submit(self: *Uring, queue: *io.SubmissionQueue) !void {
     _ = try self.ring.enter(n, 0, linux.IORING_ENTER_GETEVENTS);
 }
 
-fn sqesRequired(task: *const io.Task) u32 {
+inline fn sqesRequired(task: *const io.Task) u32 {
     return if (task.deadline == null) 1 else 2;
 }
 
-fn sqesAvailable(self: *Uring) u32 {
+inline fn sqesAvailable(self: *Uring) u32 {
     return @intCast(self.ring.sq.sqes.len - self.ring.sq_ready());
 }
 
@@ -475,7 +440,7 @@ pub fn reapCompletions(self: *Uring, rt: *io.Ring) anyerror!void {
     }
 }
 
-fn cqeToE(result: i32) std.posix.E {
+inline fn cqeToE(result: i32) std.posix.E {
     if (result > -4096 and result < 0) {
         return @as(std.posix.E, @enumFromInt(-result));
     }
