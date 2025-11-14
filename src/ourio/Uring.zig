@@ -13,6 +13,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 
 const msg_ring_received_cqe = 1 << 8;
+const special_cqe = std.math.maxInt(usize);
 
 ring: linux.IoUring,
 in_flight: Queue(io.Task, .in_flight) = .{},
@@ -261,7 +262,7 @@ fn prepTask(self: *Uring, task: *io.Task) void {
     }
 }
 
-fn prepDeadline(self: *Uring, parent_task: *io.Task, parent_sqe: *linux.io_uring_sqe) void {
+inline fn prepDeadline(self: *Uring, parent_task: *io.Task, parent_sqe: *linux.io_uring_sqe) void {
     const task = parent_task.deadline orelse return;
     self.in_flight.push(task);
     assert(task.req == .deadline);
@@ -276,7 +277,7 @@ fn prepDeadline(self: *Uring, parent_task: *io.Task, parent_sqe: *linux.io_uring
 
 /// Get an sqe from the ring. Caller should only call this function if they are sure we have an SQE
 /// available. Asserts that we have one available
-fn getSqe(self: *Uring) *linux.io_uring_sqe {
+inline fn getSqe(self: *Uring) *linux.io_uring_sqe {
     assert(self.ring.sq.sqes.len > self.ring.sq_ready());
     return self.ring.get_sqe() catch unreachable;
 }
@@ -290,6 +291,10 @@ pub fn reapCompletions(self: *Uring, rt: *io.Ring) anyerror!void {
         }
     };
     for (cqes[0..n]) |cqe| {
+        if (cqe.user_data == special_cqe) {
+            @branchHint(.cold);
+            continue;
+        }
         const task: *io.Task = @ptrFromInt(cqe.user_data);
 
         task.result = switch (task.req) {
@@ -397,6 +402,7 @@ pub fn reapCompletions(self: *Uring, rt: *io.Ring) anyerror!void {
                 .SUCCESS => @intCast(cqe.res),
                 .INVAL => io.ResultError.Invalid,
                 .CANCELED => io.ResultError.Canceled,
+
                 else => |e| unexpectedError(e),
             } },
 
@@ -406,6 +412,7 @@ pub fn reapCompletions(self: *Uring, rt: *io.Ring) anyerror!void {
                 .CANCELED => io.ResultError.Canceled,
                 .NOTDIR => posix.OpenError.NotDir,
                 .ISDIR => posix.OpenError.IsDir,
+                .ACCES => posix.OpenError.AccessDenied,
                 else => |e| unexpectedError(e),
             } },
 
